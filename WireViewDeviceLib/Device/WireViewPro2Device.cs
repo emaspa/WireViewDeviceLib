@@ -24,7 +24,7 @@ namespace WireView2.Device
         public string FirmwareVersion { get; private set; } = string.Empty;
         public string UniqueId { get; private set; } = string.Empty;
 
-        private int ConfigVersion = 0;
+        public int ConfigVersion { get; private set; }
 
         private int _pollIntervalMs = 1000;
         public int PollIntervalMs
@@ -60,7 +60,15 @@ namespace WireView2.Device
                 HardwareRevision = $"{vd.Value.VendorId:X2}{vd.Value.ProductId:X2}";
                 FirmwareVersion = vd.Value.FwVersion.ToString();
 
-                ConfigVersion = vd.Value.FwVersion > 2 ? 1 : 0;
+                // Get config version
+                int? configVersion = ReadConfigVersion();
+                if (configVersion == null)
+                {
+                    Connected = false;
+                    return;
+                }
+
+                ConfigVersion = configVersion.Value;
 
                 UniqueId = ReadUid() ?? string.Empty;
 
@@ -74,8 +82,6 @@ namespace WireView2.Device
             {
                 Connected = false;
             }
-            _port.RtsEnable = false;
-            _port.Close();
 
             if (Connected)
             {
@@ -125,12 +131,11 @@ namespace WireView2.Device
             try { Disconnect(); } catch { }
         }
 
-        public DeviceConfigStructV2? ReadConfig()
+        public DeviceConfigStructV3? ReadConfig()
         {
             if (!Connected || _port == null) return null;
 
             var size = 0;
-
 
             if (ConfigVersion == 0)
             {
@@ -139,6 +144,9 @@ namespace WireView2.Device
             else if (ConfigVersion == 1)
             {
                 size = Marshal.SizeOf<DeviceConfigStructV2>();
+            } else if(ConfigVersion == 2)
+            {
+                size = Marshal.SizeOf<DeviceConfigStructV3>();
             }
             else
             {
@@ -152,11 +160,16 @@ namespace WireView2.Device
             if (ConfigVersion == 0)
             {
                 var _s = BytesToStruct<DeviceConfigStructV1>(buf);
-                return ConvertConfigV1ToV2(_s);
+                return ConvertConfigV1ToV3(_s);
             }
             else if (ConfigVersion == 1)
             {
-                return BytesToStruct<DeviceConfigStructV2>(buf);
+                var _s = BytesToStruct<DeviceConfigStructV2>(buf);
+                return ConvertConfigV2ToV3(_s);
+            } 
+            else if (ConfigVersion == 2)
+            {
+                return BytesToStruct<DeviceConfigStructV3>(buf);
             }
             else
             {
@@ -164,7 +177,7 @@ namespace WireView2.Device
             }
         }
 
-        public void WriteConfig(DeviceConfigStructV2 config)
+        public void WriteConfig(DeviceConfigStructV3 config)
         {
             if (!Connected || _port == null) return;
 
@@ -172,10 +185,15 @@ namespace WireView2.Device
 
             if (ConfigVersion == 0)
             {
-                DeviceConfigStructV1 _s = ConvertConfigV2ToV1(config);
+                DeviceConfigStructV1 _s = ConvertConfigV3ToV1(config);
                 payload = StructToBytes(_s);
             }
             else if (ConfigVersion == 1)
+            {
+                DeviceConfigStructV2 _s = ConvertConfigV3ToV2(config);
+                payload = StructToBytes(_s);
+            } 
+            else if(ConfigVersion == 2)
             {
                 payload = StructToBytes(config);
             }
@@ -271,7 +289,7 @@ namespace WireView2.Device
 
         private string? ReadUid()
         {
-            if (!Connected || _port == null) return null;
+            if (_port == null) return null;
 
             const int uidBytes = 12;
             byte[]? buf = SendCmd(UsbCmd.CMD_READ_UID, uidBytes);
@@ -321,6 +339,14 @@ namespace WireView2.Device
             return dd;
         }
 
+        private int? ReadConfigVersion()
+        {
+            if (_port == null) return null;
+            byte[]? buf = SendCmd(UsbCmd.CMD_READ_CONFIG, 4);
+            if (buf == null) return null;
+            return buf[2];
+        }
+
         private byte[]? SendCmd(UsbCmd cmd, int responseSize = 0, bool rts = false)
         {
             return SendData(new[] { (byte)cmd }, responseSize, rts);
@@ -337,7 +363,6 @@ namespace WireView2.Device
                 if (rts)
                 {
                     _port!.RtsEnable = true;
-                    Thread.Sleep(10);
                 }
                 _port!.Write(data, 0, data.Length);
                 if (responseSize > 0)
@@ -346,7 +371,6 @@ namespace WireView2.Device
                 }
                 if (rts)
                 {
-                    Thread.Sleep(10);
                     _port!.RtsEnable = false;
                 }
                 _port!.Close();
